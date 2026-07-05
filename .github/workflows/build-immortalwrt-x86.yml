@@ -1,0 +1,143 @@
+name: Build ImmortalWrt x86_64 SNAPSHOT
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 20 * * *"
+
+env:
+  REPO_URL: https://github.com/immortalwrt/immortalwrt
+  REPO_BRANCH: master
+  TZ: Asia/Shanghai
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cleanup disk
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          docker image prune -a -f || true
+          df -h
+
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            ack antlr3 asciidoc autoconf automake autopoint binutils bison \
+            build-essential bzip2 ccache clang cmake cpio curl device-tree-compiler \
+            fastjar flex gawk gettext gcc-multilib g++-multilib git gperf haveged \
+            help2man intltool libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev \
+            libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev \
+            libssl-dev libtool lrzsz mkisofs msmtp nano ninja-build p7zip p7zip-full \
+            patch pkgconf python3 python3-pip python3-ply python3-docutils qemu-utils \
+            re2c rsync scons squashfs-tools subversion swig texinfo uglifyjs unzip \
+            vim wget xmlto xxd zlib1g-dev
+
+      - name: Clone ImmortalWrt
+        run: |
+          git clone --depth=1 -b $REPO_BRANCH $REPO_URL openwrt
+
+      - name: Update feeds
+        working-directory: ./openwrt
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Add PassWall source
+        working-directory: ./openwrt
+        run: |
+          rm -rf feeds/packages/net/{xray-core,v2ray-geodata,sing-box,chinadns-ng,dns2socks,hysteria,ipt2socks,microsocks,naiveproxy,shadowsocks-rust,shadowsocksr-libev,simple-obfs,tcping,v2ray-plugin,xray-plugin,geoview,shadow-tls}
+          rm -rf feeds/luci/applications/luci-app-passwall
+
+          git clone --depth=1 https://github.com/Openwrt-Passwall/openwrt-passwall-packages package/passwall-packages
+          git clone --depth=1 https://github.com/Openwrt-Passwall/openwrt-passwall package/passwall
+
+          ./scripts/feeds install -a
+
+      - name: Generate x86_64 config
+        working-directory: ./openwrt
+        run: |
+          cat > .config <<'EOF'
+          CONFIG_TARGET_x86=y
+          CONFIG_TARGET_x86_64=y
+          CONFIG_TARGET_x86_64_DEVICE_generic=y
+
+          CONFIG_EFI_IMAGES=y
+          CONFIG_GRUB_IMAGES=y
+          CONFIG_TARGET_IMAGES_GZIP=y
+
+          CONFIG_TARGET_ROOTFS_SQUASHFS=y
+          CONFIG_TARGET_ROOTFS_EXT4FS=y
+
+          CONFIG_PACKAGE_luci=y
+          CONFIG_PACKAGE_luci-ssl-openssl=y
+
+          CONFIG_PACKAGE_luci-app-package-manager=y
+          CONFIG_PACKAGE_luci-app-firewall=y
+          CONFIG_PACKAGE_luci-app-ttyd=y
+          CONFIG_PACKAGE_luci-app-filemanager=y
+          CONFIG_PACKAGE_luci-app-passwall=y
+          CONFIG_PACKAGE_luci-app-autocore=y
+
+          CONFIG_PACKAGE_luci-i18n-base-zh-cn=y
+          CONFIG_PACKAGE_luci-i18n-firewall-zh-cn=y
+          CONFIG_PACKAGE_luci-i18n-package-manager-zh-cn=y
+          CONFIG_PACKAGE_luci-i18n-ttyd-zh-cn=y
+          CONFIG_PACKAGE_luci-i18n-filemanager-zh-cn=y
+          CONFIG_PACKAGE_luci-i18n-passwall-zh-cn=y
+
+          CONFIG_PACKAGE_openssh-sftp-server=y
+          CONFIG_PACKAGE_autocore-x86=y
+
+          CONFIG_PACKAGE_ethtool=y
+          CONFIG_PACKAGE_htop=y
+          CONFIG_PACKAGE_iperf3=y
+          CONFIG_PACKAGE_curl=y
+          CONFIG_PACKAGE_wget-ssl=y
+          CONFIG_PACKAGE_ca-bundle=y
+          CONFIG_PACKAGE_kmod-nft-offload=y
+
+          CONFIG_PACKAGE_xray-core=y
+          CONFIG_PACKAGE_v2ray-geodata=y
+          CONFIG_PACKAGE_sing-box=y
+          CONFIG_PACKAGE_chinadns-ng=y
+          CONFIG_PACKAGE_dns2socks=y
+          CONFIG_PACKAGE_hysteria=y
+          CONFIG_PACKAGE_ipt2socks=y
+          CONFIG_PACKAGE_microsocks=y
+          CONFIG_PACKAGE_naiveproxy=y
+          CONFIG_PACKAGE_shadowsocks-rust-sslocal=y
+          CONFIG_PACKAGE_shadowsocks-rust-ssserver=y
+          CONFIG_PACKAGE_shadowsocksr-libev-ssr-local=y
+          CONFIG_PACKAGE_simple-obfs=y
+          CONFIG_PACKAGE_tcping=y
+          CONFIG_PACKAGE_xray-plugin=y
+          EOF
+
+          make defconfig
+
+      - name: Download packages
+        working-directory: ./openwrt
+        run: |
+          make download -j8
+          find dl -size -1024c -exec rm -f {} \;
+
+      - name: Build firmware
+        working-directory: ./openwrt
+        run: |
+          make -j$(nproc) V=s
+
+      - name: Upload firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: ImmortalWrt-x86_64-SNAPSHOT
+          path: |
+            openwrt/bin/targets/x86/64/*

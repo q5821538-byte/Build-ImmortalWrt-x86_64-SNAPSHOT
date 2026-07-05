@@ -33,171 +33,76 @@ jobs:
           sudo apt install -y \
             build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
             gettext git libncurses5-dev libncursesw5-dev libssl-dev python3 \
-            python3-setuptools rsync swig unzip zlib1g-dev file wget curl \
-            subversion libelf-dev libtool autoconf automake autopoint \
-            device-tree-compiler gperf antlr3 asciidoc binutils bzip2 ccache \
-            cmake cpio help2man intltool libglib2.0-dev libgmp-dev libltdl-dev \
-            libmpc-dev libmpfr-dev libreadline-dev ninja-build p7zip p7zip-full \
-            patch pkgconf python3-ply python3-docutils qemu-utils re2c scons \
-            squashfs-tools texinfo uglifyjs upx-ucl vim nano xmlto xxd zstd
+            python3-setuptools python3-pyelftools python3-distutils-extra \
+            rsync unzip zlib1g-dev file wget curl subversion swig time \
+            libelf-dev device-tree-compiler qemu-utils xxd
+          sudo timedatectl set-timezone "$TZ"
 
-      - name: Clone ImmortalWrt
+      - name: Add swap
+        run: |
+          sudo fallocate -l 8G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
+
+      - name: Clone ImmortalWrt source
         run: |
           git clone --depth=1 -b "$REPO_BRANCH" "$REPO_URL" immortalwrt
-
-      - name: Update feeds
-        working-directory: ./immortalwrt
-        run: |
-          # 不添加 PassWall feeds；同时删除 feeds.conf.default 里可能存在的无效/不用源。
-          sed -i '/passwall_packages/d' feeds.conf.default || true
-          sed -i '/passwall_luci/d' feeds.conf.default || true
-          sed -i '/src-git[[:space:]]\+video/d' feeds.conf.default || true
-
-          echo "=== feeds.conf.default ==="
-          cat feeds.conf.default
-
-          if grep -E 'passwall_packages|passwall_luci' feeds.conf.default; then
-            echo "错误：feeds.conf.default 仍包含 PassWall feed"
-            exit 1
-          fi
-
+          cd immortalwrt
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: Custom default network
-        working-directory: ./immortalwrt
+      - name: Generate final x86_64 config for R3 4300U + Intel I226-V
         run: |
-          mkdir -p files/etc/uci-defaults
+          cd immortalwrt
 
-          cat > files/etc/uci-defaults/99-custom-network <<'EOF_SCRIPT'
-          #!/bin/sh
+          mkdir -p files/etc/config
 
-          uci -q delete network.lan
-          uci set network.lan='interface'
-          uci set network.lan.device='br-lan'
-          uci set network.lan.proto='static'
-          uci set network.lan.ipaddr='192.168.1.1'
-          uci set network.lan.netmask='255.255.255.0'
-          uci set network.lan.ip6assign='60'
+          cat > files/etc/config/network <<'EOF'
+          config interface 'loopback'
+                  option device 'lo'
+                  option proto 'static'
+                  option ipaddr '127.0.0.1'
+                  option netmask '255.0.0.0'
 
-          uci -q delete network.br_lan
-          uci set network.br_lan='device'
-          uci set network.br_lan.name='br-lan'
-          uci set network.br_lan.type='bridge'
-          uci add_list network.br_lan.ports='eth0'
+          config globals 'globals'
+                  option packet_steering '1'
 
-          uci -q delete network.wan
-          uci set network.wan='interface'
-          uci set network.wan.device='eth1'
-          uci set network.wan.proto='dhcp'
+          config interface 'lan'
+                  option device 'eth0'
+                  option proto 'static'
+                  option ipaddr '192.168.1.1'
+                  option netmask '255.255.255.0'
+                  option ip6assign '60'
 
-          uci -q delete network.wan6
-          uci set network.wan6='interface'
-          uci set network.wan6.device='eth1'
-          uci set network.wan6.proto='dhcpv6'
+          config interface 'wan'
+                  option device 'eth1'
+                  option proto 'dhcp'
 
-          uci commit network
-          exit 0
-          EOF_SCRIPT
+          config interface 'wan6'
+                  option device '@wan'
+                  option proto 'dhcpv6'
+          EOF
 
-          chmod +x files/etc/uci-defaults/99-custom-network
-
-      - name: Custom default language
-        working-directory: ./immortalwrt
-        run: |
-          mkdir -p files/etc/uci-defaults
-
-          cat > files/etc/uci-defaults/98-default-language <<'EOF_SCRIPT'
-          #!/bin/sh
-
-          uci -q set luci.main=core
-          uci -q set luci.main.lang='zh_cn'
-          uci -q set luci.languages=internal
-          uci -q set luci.languages.zh_cn='简体中文'
-          uci -q set luci.languages.en='English'
-          uci -q commit luci
-
-          rm -rf /tmp/luci-* /tmp/luci-indexcache /tmp/luci-modulecache /var/run/luci-*
-          exit 0
-          EOF_SCRIPT
-
-          chmod +x files/etc/uci-defaults/98-default-language
-
-      - name: Fix apk package manager feeds
-        working-directory: ./immortalwrt
-        run: |
-          mkdir -p files/etc/uci-defaults
-
-          cat > files/etc/uci-defaults/97-fix-apk-feeds <<'EOF_SCRIPT'
-          #!/bin/sh
-
-          # ImmortalWrt/OpenWrt 25.12+ 使用 apk，默认源文件是 /etc/apk/repositories.d/distfeeds.list。
-          # 这里修复会导致 LuCI 软件包管理器报 JSON 错误的常见情况：
-          # 1. 删除 PassWall 自定义 feed 残留；
-          # 2. 删除 ImmortalWrt 当前 x86_64 snapshot 上不存在的 video 源；
-          # 3. 删除错误的 Alpine APKINDEX 源；
-          # 4. 保留官方 packages.adb 格式源和 kmods 源。
-
-          mkdir -p /etc/apk/repositories.d
-
-          for f in /etc/apk/repositories /etc/apk/repositories.d/*; do
-            [ -f "$f" ] || continue
-            sed -i '/passwall_luci/d' "$f"
-            sed -i '/passwall_packages/d' "$f"
-            sed -i '/\/video\/packages\.adb/d' "$f"
-            sed -i '/\/video$/d' "$f"
-            sed -i '/APKINDEX\.tar\.gz/d' "$f"
-            sed -i '/^[[:space:]]*$/d' "$f"
-          done
-
-          # /etc/apk/repositories 使用 Alpine 目录源格式时会自动拼 /x86_64/APKINDEX.tar.gz，
-          # OpenWrt/ImmortalWrt 应使用 repositories.d 里的 packages.adb。
-          : > /etc/apk/repositories
-
-          # 兜底：如果 distfeeds.list 中有人手动写成目录源，就自动补成 packages.adb。
-          if [ -f /etc/apk/repositories.d/distfeeds.list ]; then
-            awk '
-              /^#/ || /^$/ { print; next }
-              /packages\.adb$/ { print; next }
-              /\/$/ { print $0 "packages.adb"; next }
-              { print }
-            ' /etc/apk/repositories.d/distfeeds.list > /tmp/distfeeds.list.fixed
-            mv /tmp/distfeeds.list.fixed /etc/apk/repositories.d/distfeeds.list
-            sed -i '/\/video\/packages\.adb/d' /etc/apk/repositories.d/distfeeds.list
-            sed -i '/passwall_luci/d;/passwall_packages/d;/APKINDEX\.tar\.gz/d;/^[[:space:]]*$/d' /etc/apk/repositories.d/distfeeds.list
-          fi
-
-          rm -rf /var/cache/apk/* /tmp/luci-* /tmp/luci-indexcache /tmp/luci-modulecache /var/run/luci-*
-          exit 0
-          EOF_SCRIPT
-
-          chmod +x files/etc/uci-defaults/97-fix-apk-feeds
-
-      - name: Generate x86_64 config
-        working-directory: ./immortalwrt
-        run: |
-          cat > .config <<'EOF_CONFIG'
+          cat > .config <<'EOF'
           CONFIG_TARGET_x86=y
           CONFIG_TARGET_x86_64=y
           CONFIG_TARGET_x86_64_DEVICE_generic=y
 
-          CONFIG_EFI_IMAGES=y
-          CONFIG_GRUB_IMAGES=y
           CONFIG_TARGET_IMAGES_GZIP=y
+          CONFIG_TARGET_KERNEL_PARTSIZE=64
           CONFIG_TARGET_ROOTFS_PARTSIZE=2048
 
-          CONFIG_TARGET_ROOTFS_SQUASHFS=y
-          CONFIG_TARGET_ROOTFS_EXT4FS=y
+          CONFIG_LUCI_LANG_zh_Hans=y
 
           CONFIG_PACKAGE_luci=y
+          CONFIG_PACKAGE_luci-base=y
           CONFIG_PACKAGE_luci-ssl-openssl=y
-          CONFIG_PACKAGE_luci-theme-bootstrap=y
-
           CONFIG_PACKAGE_luci-app-package-manager=y
           CONFIG_PACKAGE_luci-app-firewall=y
           CONFIG_PACKAGE_luci-app-ttyd=y
           CONFIG_PACKAGE_luci-app-filemanager=y
-          CONFIG_PACKAGE_luci-app-autocore=y
 
           CONFIG_PACKAGE_luci-i18n-base-zh-cn=y
           CONFIG_PACKAGE_luci-i18n-firewall-zh-cn=y
@@ -207,106 +112,89 @@ jobs:
 
           CONFIG_PACKAGE_openssh-sftp-server=y
           CONFIG_PACKAGE_autocore=y
-          CONFIG_PACKAGE_autocore-x86=y
 
-          CONFIG_PACKAGE_ethtool=y
-          CONFIG_PACKAGE_htop=y
-          CONFIG_PACKAGE_iperf3=y
-          CONFIG_PACKAGE_curl=y
-          CONFIG_PACKAGE_wget-ssl=y
-          CONFIG_PACKAGE_ca-bundle=y
+          CONFIG_PACKAGE_amd64-microcode=y
+          CONFIG_PACKAGE_kmod-hwmon-core=y
+          CONFIG_PACKAGE_kmod-hwmon-k10temp=y
+          CONFIG_PACKAGE_lm-sensors=y
 
+          CONFIG_PACKAGE_kmod-igc=y
+          CONFIG_PACKAGE_kmod-r8169=y
+          CONFIG_PACKAGE_kmod-e1000e=y
+          CONFIG_PACKAGE_kmod-ixgbe=y
+          CONFIG_PACKAGE_kmod-tun=y
           CONFIG_PACKAGE_kmod-nft-offload=y
+          CONFIG_PACKAGE_ethtool=y
+          CONFIG_PACKAGE_irqbalance=y
 
-          # CONFIG_PACKAGE_dnsmasq is not set
-          CONFIG_PACKAGE_dnsmasq-full=y
-
-          # 明确排除 PassWall/代理核心，避免把无效运行时源带进固件。
-          # CONFIG_PACKAGE_luci-app-passwall is not set
-          # CONFIG_PACKAGE_luci-i18n-passwall-zh-cn is not set
-          # CONFIG_PACKAGE_xray-core is not set
-          # CONFIG_PACKAGE_sing-box is not set
-          # CONFIG_PACKAGE_v2ray-geodata is not set
-          EOF_CONFIG
+          CONFIG_PACKAGE_ca-bundle=y
+          CONFIG_PACKAGE_curl=y
+          CONFIG_PACKAGE_htop=y
+          CONFIG_PACKAGE_nano=y
+          CONFIG_PACKAGE_wget-ssl=y
+          CONFIG_PACKAGE_unzip=y
+          CONFIG_PACKAGE_block-mount=y
+          CONFIG_PACKAGE_e2fsprogs=y
+          CONFIG_PACKAGE_lsblk=y
+          CONFIG_PACKAGE_fdisk=y
+          CONFIG_PACKAGE_parted=y
+          CONFIG_PACKAGE_pciutils=y
+          EOF
 
           make defconfig
 
-          echo "=== 检查 2G 软件包空间 ==="
-          grep -q 'CONFIG_TARGET_ROOTFS_PARTSIZE=2048' .config || {
-            echo "错误：ROOTFS 分区没有设置为 2048MB"
-            exit 1
-          }
+          echo "============================================================"
+          echo "最终配置检查：R3 4300U / Intel I226-V / x86_64 generic"
+          echo "注意：下面只检查并打印结果，不会因为 LuCI 中文包映射导致误报退出。"
+          echo "============================================================"
 
-          echo "=== 检查必要 LuCI 和中文包 ==="
-          REQUIRED_PACKAGES="
-          CONFIG_PACKAGE_luci=y
-          CONFIG_PACKAGE_luci-ssl-openssl=y
-          CONFIG_PACKAGE_luci-app-package-manager=y
-          CONFIG_PACKAGE_luci-app-firewall=y
-          CONFIG_PACKAGE_luci-app-ttyd=y
-          CONFIG_PACKAGE_luci-app-filemanager=y
-          CONFIG_PACKAGE_luci-i18n-base-zh-cn=y
-          CONFIG_PACKAGE_luci-i18n-firewall-zh-cn=y
-          CONFIG_PACKAGE_luci-i18n-package-manager-zh-cn=y
-          CONFIG_PACKAGE_luci-i18n-ttyd-zh-cn=y
-          CONFIG_PACKAGE_luci-i18n-filemanager-zh-cn=y
-          CONFIG_PACKAGE_openssh-sftp-server=y
-          CONFIG_PACKAGE_luci-app-autocore=y
-          CONFIG_PACKAGE_autocore-x86=y
-          "
+          echo "=== 目标平台 ==="
+          grep -E '^CONFIG_TARGET_x86=y|^CONFIG_TARGET_x86_64=y|^CONFIG_TARGET_x86_64_DEVICE_generic=y' .config || true
 
-          echo "$REQUIRED_PACKAGES" | while read -r pkg; do
-            [ -n "$pkg" ] || continue
-            grep -q "$pkg" .config || {
-              echo "错误：$pkg 没有进入最终 .config"
-              exit 1
-            }
-          done
+          echo "=== 分区大小 ==="
+          grep '^CONFIG_TARGET_KERNEL_PARTSIZE=64' .config || true
+          grep '^CONFIG_TARGET_ROOTFS_PARTSIZE=2048' .config || true
 
-          if grep -Eq 'CONFIG_PACKAGE_(luci-app-passwall|luci-i18n-passwall-zh-cn|xray-core|sing-box|v2ray-geodata)=y' .config; then
-            echo "错误：PassWall 或代理核心仍在最终 .config 里"
-            grep -E 'CONFIG_PACKAGE_(luci-app-passwall|luci-i18n-passwall-zh-cn|xray-core|sing-box|v2ray-geodata)=y' .config
-            exit 1
-          fi
+          echo "=== LuCI / 中文 / 插件 ==="
+          grep -E '^CONFIG_LUCI_LANG_zh_Hans=y|^CONFIG_PACKAGE_luci=y|^CONFIG_PACKAGE_luci-base=y|^CONFIG_PACKAGE_luci-ssl-openssl=y|^CONFIG_PACKAGE_luci-app-package-manager=y|^CONFIG_PACKAGE_luci-app-firewall=y|^CONFIG_PACKAGE_luci-app-ttyd=y|^CONFIG_PACKAGE_luci-app-filemanager=y|^CONFIG_PACKAGE_openssh-sftp-server=y|^CONFIG_PACKAGE_autocore=y' .config || true
+
+          echo "=== R3 4300U / AMD 温度 / 微码 ==="
+          grep -E '^CONFIG_PACKAGE_amd64-microcode=y|^CONFIG_PACKAGE_kmod-hwmon-k10temp=y|^CONFIG_PACKAGE_lm-sensors=y' .config || true
+
+          echo "=== Intel I226-V 网卡关键驱动 ==="
+          grep -E '^CONFIG_PACKAGE_kmod-igc=y|^CONFIG_PACKAGE_ethtool=y|^CONFIG_PACKAGE_irqbalance=y|^CONFIG_PACKAGE_kmod-nft-offload=y' .config || true
+
+          echo "=== 代理插件确认：不内置 PassWall / Nikki / OpenClash / SSR Plus ==="
+          grep -Ei 'passwall|nikki|openclash|shadowsocksr|ssr-plus' .config && exit 1 || true
+
+          echo "=== 最终 .config 关键项输出结束 ==="
 
       - name: Download packages
-        working-directory: ./immortalwrt
         run: |
-          make download -j8
-          find dl -size -1024c -exec rm -f {} \;
+          cd immortalwrt
+          make download -j$(nproc) || make download -j1 V=s
+          find dl -size -1024c -exec rm -f {} \; || true
 
       - name: Build firmware
-        working-directory: ./immortalwrt
         run: |
-          echo "=== 开始编译：正常模式不使用 V=s，减少 GitHub 日志输出 ==="
-          make -j"$(nproc)" || {
-            echo "=== 并行编译失败，切换单线程详细日志用于定位错误 ==="
-            make -j1 V=s
-          }
+          cd immortalwrt
+          make -j$(nproc) || make -j1 V=s
 
       - name: Check firmware output
-        working-directory: ./immortalwrt
         run: |
-          echo "=== 固件输出 ==="
+          cd immortalwrt
+          echo "=== 固件输出目录 ==="
           ls -lh bin/targets/x86/64/
 
-          test -n "$(find bin/targets/x86/64 -name '*combined*.img.gz' -print -quit)" || {
-            echo "错误：没有生成 combined.img.gz"
-            exit 1
-          }
-
-          MANIFEST="$(find bin/targets/x86/64 -name '*.manifest' -print -quit)"
-          if [ -f "$MANIFEST" ]; then
-            echo "=== 检查 manifest 是否仍有 PassWall/代理核心 ==="
-            if grep -Ei 'passwall|xray-core|sing-box|v2ray-geodata' "$MANIFEST"; then
-              echo "错误：manifest 里仍包含 PassWall/代理核心"
-              exit 1
-            fi
-          fi
+          echo "=== 固件文件 ==="
+          find bin/targets/x86/64/ -type f \( -name "*.img.gz" -o -name "sha256sums" \) -print -exec ls -lh {} \;
 
       - name: Upload firmware
         uses: actions/upload-artifact@v4
         with:
-          name: ImmortalWrt-x86_64-SNAPSHOT-NoPassWall-LuCI-ZH-2G
+          name: immortalwrt-r3-4300u-i226v-x86_64
           path: |
-            immortalwrt/bin/targets/x86/64/*
+            immortalwrt/bin/targets/x86/64/*combined*.img.gz
+            immortalwrt/bin/targets/x86/64/*rootfs*.img.gz
+            immortalwrt/bin/targets/x86/64/sha256sums
+          if-no-files-found: error

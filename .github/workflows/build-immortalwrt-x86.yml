@@ -192,6 +192,14 @@ jobs:
             ./scripts/feeds install -a
           }
 
+          # Keep PassWall packages installed from local feeds, but do not let these
+          # local feed names become runtime APK repositories.
+          for fc in feeds.conf.default feeds.conf; do
+            [ -f "$fc" ] || continue
+            awk '$2 != "passwall_packages" && $2 != "passwall_luci"' "$fc" > "$fc.nopasswallrepos"
+            mv "$fc.nopasswallrepos" "$fc"
+          done
+
       - name: Generate final x86_64 config for R3 4300U
         working-directory: immortalwrt
         run: |
@@ -200,6 +208,23 @@ jobs:
           mkdir -p files/etc/config
           mkdir -p files/etc/uci-defaults
           mkdir -p files/etc/sysctl.d
+          mkdir -p files/etc/apk/repositories.d
+
+          # Runtime APK repositories: keep only official ImmortalWrt snapshot repos.
+          # PassWall feeds are used only at build time; do not leave them as runtime repos.
+          cat > files/etc/apk/repositories <<'EOF_REPOS'
+          # This file is auto-generated and build-specific, any changes will be intentionally lost in sysupgrade.
+          # Add your custom feeds to /etc/apk/repositories.d/customfeeds.list
+          https://downloads.immortalwrt.org/snapshots/targets/x86/64/packages/packages.adb
+          https://downloads.immortalwrt.org/snapshots/packages/x86_64/base/packages.adb
+          https://downloads.immortalwrt.org/snapshots/packages/x86_64/luci/packages.adb
+          https://downloads.immortalwrt.org/snapshots/packages/x86_64/packages/packages.adb
+          https://downloads.immortalwrt.org/snapshots/packages/x86_64/routing/packages.adb
+          https://downloads.immortalwrt.org/snapshots/packages/x86_64/telephony/packages.adb
+          EOF_REPOS
+          sed -i 's/^          //' files/etc/apk/repositories
+
+          : > files/etc/apk/repositories.d/customfeeds.list
 
           cat > files/etc/config/network <<'EOF_NET'
           config interface 'loopback'
@@ -235,9 +260,34 @@ jobs:
           cat > files/etc/uci-defaults/98-fix-apk-repositories <<'EOF_APK'
           #!/bin/sh
 
+          # PassWall feeds are build-time feeds. They must not stay in runtime APK repos,
+          # otherwise apk/LuCI package update will request non-existent official indexes:
+          # passwall_luci/packages.adb and passwall_packages/packages.adb.
+
+          mkdir -p /etc/apk/repositories.d
+
+          cat > /etc/apk/repositories <<'EOF_REPOS_BOOT'
+          # This file is auto-generated and build-specific, any changes will be intentionally lost in sysupgrade.
+          # Add your custom feeds to /etc/apk/repositories.d/customfeeds.list
+          https://downloads.immortalwrt.org/snapshots/targets/x86/64/packages/packages.adb
+          https://downloads.immortalwrt.org/snapshots/packages/x86_64/base/packages.adb
+          https://downloads.immortalwrt.org/snapshots/packages/x86_64/luci/packages.adb
+          https://downloads.immortalwrt.org/snapshots/packages/x86_64/packages/packages.adb
+          https://downloads.immortalwrt.org/snapshots/packages/x86_64/routing/packages.adb
+          https://downloads.immortalwrt.org/snapshots/packages/x86_64/telephony/packages.adb
+          EOF_REPOS_BOOT
+
+          : > /etc/apk/repositories.d/customfeeds.list
+
           for f in /etc/apk/repositories /etc/apk/repositories.d/*.list /etc/apk/repositories.d/*.repositories; do
             [ -f "$f" ] || continue
-            sed -i '\|/snapshots/packages/x86_64/video| { /^[[:space:]]*#/! s|^[[:space:]]*|# | }' "$f"
+            sed -i \
+              -e '\|/snapshots/packages/x86_64/video|d' \
+              -e '\|/snapshots/packages/x86_64/passwall_luci|d' \
+              -e '\|/snapshots/packages/x86_64/passwall_packages|d' \
+              -e '\|/snapshots/packages/.*/passwall_luci|d' \
+              -e '\|/snapshots/packages/.*/passwall_packages|d' \
+              "$f"
           done
 
           rm -rf /var/cache/apk/* /tmp/apk-cache/* 2>/dev/null || true
@@ -381,7 +431,7 @@ jobs:
       - name: Upload firmware
         uses: actions/upload-artifact@v6
         with:
-          name: immortalwrt-x86_64-r3-4300u-passwall-apkfixed
+          name: immortalwrt-x86_64-r3-4300u-passwall-repos-final
           path: |
             immortalwrt/bin/targets/x86/64/*combined*.img.gz
             immortalwrt/bin/targets/x86/64/*rootfs*.img.gz

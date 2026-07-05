@@ -1,23 +1,24 @@
-name: Build ImmortalWrt x86_64 SNAPSHOT R3-4300U
+name: Build ImmortalWrt x86_64 SNAPSHOT R3-4300U PassWall
 
 on:
   workflow_dispatch:
   schedule:
     - cron: "0 20 * * *"
 
+permissions:
+  contents: read
+
 env:
   REPO_URL: https://github.com/immortalwrt/immortalwrt
   REPO_BRANCH: master
   TZ: Asia/Shanghai
+  GIT_TERMINAL_PROMPT: 0
 
 jobs:
   build:
     runs-on: ubuntu-24.04
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
       - name: Cleanup disk
         run: |
           set -e
@@ -43,23 +44,19 @@ jobs:
 
       - name: Add swap safe mode
         run: |
-          # Swap is helpful for full source compile, but this step must never stop the build.
           set +e
-
           echo "Swap before:"
           swapon --show || true
           free -h || true
           df -h / /mnt || true
 
           SWAPFILE="/mnt/swapfile-${GITHUB_RUN_ID}"
-
           sudo swapoff "$SWAPFILE" 2>/dev/null || true
           sudo rm -f "$SWAPFILE" || true
 
           echo "Creating swap at $SWAPFILE"
           sudo fallocate -l 8G "$SWAPFILE"
           FALL_RESULT=$?
-
           if [ "$FALL_RESULT" -ne 0 ]; then
             echo "fallocate failed, trying dd fallback"
             sudo dd if=/dev/zero of="$SWAPFILE" bs=1M count=8192 status=progress
@@ -74,40 +71,71 @@ jobs:
           echo "Swap after:"
           swapon --show || true
           free -h || true
-
-          # Do not fail the workflow because of swap.
           exit 0
 
       - name: Clone ImmortalWrt source
         run: |
           set -e
-          git clone --depth=1 -b "$REPO_BRANCH" "$REPO_URL" immortalwrt
+          retry() {
+            local max=3
+            local n=1
+            until "$@"; do
+              if [ "$n" -ge "$max" ]; then
+                echo "Command failed after $max attempts: $*"
+                return 1
+              fi
+              echo "Command failed: $*"
+              echo "Retrying in $((n * 20)) seconds..."
+              sleep $((n * 20))
+              n=$((n + 1))
+            done
+          }
+          retry git clone --depth=1 -b "$REPO_BRANCH" "$REPO_URL" immortalwrt
 
       - name: Add PassWall feeds
         working-directory: immortalwrt
         run: |
           set -e
 
-          # Use the current official PassWall source repositories.
-          # Put them at the top so they take priority over old copies from default feeds.
+          git config --global http.version HTTP/1.1 || true
+          git config --global http.postBuffer 524288000 || true
+          git config --global url."https://github.com/".insteadOf git://github.com/ || true
+
+          retry() {
+            local max=3
+            local n=1
+            until "$@"; do
+              if [ "$n" -ge "$max" ]; then
+                echo "Command failed after $max attempts: $*"
+                return 1
+              fi
+              echo "Command failed: $*"
+              echo "Retrying in $((n * 20)) seconds..."
+              sleep $((n * 20))
+              n=$((n + 1))
+            done
+          }
+
+          retry git ls-remote --heads https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git main
+          retry git ls-remote --heads https://github.com/Openwrt-Passwall/openwrt-passwall.git main
+
           cat > /tmp/passwall-feeds.conf <<'EOF_PASSWALL_FEEDS'
-          src-git passwall_luci https://github.com/Openwrt-Passwall/openwrt-passwall.git;main
           src-git passwall_packages https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git;main
+          src-git passwall_luci https://github.com/Openwrt-Passwall/openwrt-passwall.git;main
           EOF_PASSWALL_FEEDS
           sed -i 's/^          //' /tmp/passwall-feeds.conf
-          cat /tmp/passwall-feeds.conf feeds.conf.default > feeds.conf.default.new
-          mv feeds.conf.default.new feeds.conf.default
+
+          cp feeds.conf.default feeds.conf.default.bak
+          grep -v 'openwrt-passwall' feeds.conf.default.bak > feeds.conf.default.clean
+          cat /tmp/passwall-feeds.conf feeds.conf.default.clean > feeds.conf.default
 
           echo "PassWall feeds added:"
-          head -n 5 feeds.conf.default
+          head -n 8 feeds.conf.default
 
       - name: Update and install feeds safe mode
         working-directory: immortalwrt
         run: |
           set -e
-
-          git config --global http.version HTTP/1.1 || true
-          git config --global http.postBuffer 524288000 || true
 
           retry() {
             local max=3
@@ -134,7 +162,23 @@ jobs:
 
           echo "Removing possible old/conflicting PassWall packages from default feeds..."
           rm -rf feeds/luci/applications/luci-app-passwall || true
-          rm -rf feeds/packages/net/{xray-core,v2ray-geodata,sing-box,chinadns-ng,dns2socks,hysteria,ipt2socks,microsocks,naiveproxy,shadowsocks-rust,shadowsocksr-libev,simple-obfs,tcping,v2ray-plugin,xray-plugin,geoview,shadow-tls} || true
+          rm -rf feeds/packages/net/xray-core || true
+          rm -rf feeds/packages/net/v2ray-geodata || true
+          rm -rf feeds/packages/net/sing-box || true
+          rm -rf feeds/packages/net/chinadns-ng || true
+          rm -rf feeds/packages/net/dns2socks || true
+          rm -rf feeds/packages/net/hysteria || true
+          rm -rf feeds/packages/net/ipt2socks || true
+          rm -rf feeds/packages/net/microsocks || true
+          rm -rf feeds/packages/net/naiveproxy || true
+          rm -rf feeds/packages/net/shadowsocks-rust || true
+          rm -rf feeds/packages/net/shadowsocksr-libev || true
+          rm -rf feeds/packages/net/simple-obfs || true
+          rm -rf feeds/packages/net/tcping || true
+          rm -rf feeds/packages/net/v2ray-plugin || true
+          rm -rf feeds/packages/net/xray-plugin || true
+          rm -rf feeds/packages/net/geoview || true
+          rm -rf feeds/packages/net/shadow-tls || true
 
           echo "Installing feeds..."
           retry ./scripts/feeds install -a || {
@@ -182,27 +226,19 @@ jobs:
                   option device 'eth1'
                   option proto 'dhcpv6'
           EOF_NET
-
           sed -i 's/^          //' files/etc/config/network
 
           cat > files/etc/uci-defaults/98-fix-apk-repositories <<'EOF_APK'
           #!/bin/sh
 
-          # ImmortalWrt SNAPSHOT x86_64 video repo may occasionally return a broken packages.adb.
-          # R3 4300U router builds do not need the video feed by default, so disable only this feed.
           for f in /etc/apk/repositories /etc/apk/repositories.d/*.list /etc/apk/repositories.d/*.repositories; do
-                  [ -f "$f" ] || continue
-                  awk '
-                          /\/packages\/x86_64\/video(\/packages\.adb)?\/?([[:space:]]*)$/ && $0 !~ /^[[:space:]]*#/ { print "# " $0; next }
-                          { print }
-                  ' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+            [ -f "$f" ] || continue
+            sed -i '\|/snapshots/packages/x86_64/video| { /^[[:space:]]*#/! s|^[[:space:]]*|# | }' "$f"
           done
 
           rm -rf /var/cache/apk/* /tmp/apk-cache/* 2>/dev/null || true
-
           exit 0
           EOF_APK
-
           sed -i 's/^          //' files/etc/uci-defaults/98-fix-apk-repositories
           chmod +x files/etc/uci-defaults/98-fix-apk-repositories
 
@@ -233,7 +269,6 @@ jobs:
 
           exit 0
           EOF_DEFAULTS
-
           sed -i 's/^          //' files/etc/uci-defaults/99-r3-4300u-defaults
           chmod +x files/etc/uci-defaults/99-r3-4300u-defaults
 
@@ -254,7 +289,6 @@ jobs:
           CONFIG_TARGET_ROOTFS_PARTSIZE=1024
           CONFIG_TARGET_KERNEL_PARTSIZE=128
 
-          # LuCI + 中文 + 常用管理
           CONFIG_PACKAGE_luci=y
           CONFIG_PACKAGE_luci-ssl-openssl=y
           CONFIG_PACKAGE_luci-app-package-manager=y
@@ -268,7 +302,6 @@ jobs:
           CONFIG_PACKAGE_luci-i18n-filemanager-zh-cn=y
           CONFIG_PACKAGE_openssh-sftp-server=y
 
-          # PassWall
           CONFIG_PACKAGE_luci-app-passwall=y
           CONFIG_PACKAGE_luci-i18n-passwall-zh-cn=y
           CONFIG_PACKAGE_xray-core=y
@@ -278,35 +311,29 @@ jobs:
           CONFIG_PACKAGE_tcping=y
           CONFIG_PACKAGE_v2ray-geodata=y
 
-          # R3 4300U / x86_64 / I226-V
           CONFIG_PACKAGE_kmod-igc=y
           CONFIG_PACKAGE_ethtool=y
           CONFIG_PACKAGE_pciutils=y
           CONFIG_PACKAGE_irqbalance=y
 
-          # autocore + 温度传感器
           CONFIG_PACKAGE_autocore=y
           CONFIG_PACKAGE_lm-sensors=y
           CONFIG_PACKAGE_kmod-hwmon-k10temp=y
 
-          # 文件系统和磁盘工具
           CONFIG_PACKAGE_block-mount=y
           CONFIG_PACKAGE_lsblk=y
           CONFIG_PACKAGE_fdisk=y
           CONFIG_PACKAGE_parted=y
 
-          # 明确不要其他代理插件
           # CONFIG_PACKAGE_luci-app-openclash is not set
           # CONFIG_PACKAGE_luci-app-passwall2 is not set
           # CONFIG_PACKAGE_luci-app-ssr-plus is not set
           # CONFIG_PACKAGE_luci-app-nikki is not set
           EOF_CONFIG
-
           sed -i 's/^          //' .config
 
           make defconfig
 
-          # Force these values after defconfig too, so they cannot be silently changed back.
           grep -q '^CONFIG_TARGET_ROOTFS_PARTSIZE=' .config && \
             sed -i 's/^CONFIG_TARGET_ROOTFS_PARTSIZE=.*/CONFIG_TARGET_ROOTFS_PARTSIZE=1024/' .config || \
             echo 'CONFIG_TARGET_ROOTFS_PARTSIZE=1024' >> .config
@@ -325,13 +352,11 @@ jobs:
         working-directory: immortalwrt
         run: |
           set -e
-
           make download -j"$(nproc)" || make download -j1 V=s || {
             echo "Download failed, removing tiny/broken files and retrying..."
             find dl -size -1024c -exec rm -f {} \; || true
             make download -j1 V=s
           }
-
           find dl -size -1024c -exec rm -f {} \; || true
 
       - name: Build firmware
@@ -346,11 +371,10 @@ jobs:
           set -e
           echo "Firmware files:"
           find bin/targets/x86/64 -type f | sort
-
           test -n "$(find bin/targets/x86/64 -type f -name '*combined*.img.gz' -print -quit)"
 
       - name: Upload firmware
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: immortalwrt-x86_64-r3-4300u-passwall-apkfixed
           path: |
@@ -358,3 +382,4 @@ jobs:
             immortalwrt/bin/targets/x86/64/*rootfs*.img.gz
             immortalwrt/bin/targets/x86/64/sha256sums
           if-no-files-found: error
+          compression-level: 0

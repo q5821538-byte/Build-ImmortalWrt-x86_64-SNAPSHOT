@@ -379,7 +379,7 @@ jobs:
           test -n "$(find bin/targets/x86/64 -type f -name '*combined*.img.gz' -print -quit)"
 
       - name: Upload firmware
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: immortalwrt-x86_64-r3-4300u-passwall-apkfixed
           path: |

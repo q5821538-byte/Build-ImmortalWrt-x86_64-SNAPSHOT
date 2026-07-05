@@ -62,6 +62,45 @@ jobs:
 
           ./scripts/feeds install -a
 
+      - name: Custom default network
+        working-directory: ./openwrt
+        run: |
+          mkdir -p files/etc/uci-defaults
+
+          cat > files/etc/uci-defaults/99-custom-network <<'EOF'
+          #!/bin/sh
+
+          uci -q delete network.lan
+          uci set network.lan='interface'
+          uci set network.lan.device='br-lan'
+          uci set network.lan.proto='static'
+          uci set network.lan.ipaddr='192.168.1.1'
+          uci set network.lan.netmask='255.255.255.0'
+          uci set network.lan.ip6assign='60'
+
+          uci -q delete network.br_lan
+          uci set network.br_lan='device'
+          uci set network.br_lan.name='br-lan'
+          uci set network.br_lan.type='bridge'
+          uci add_list network.br_lan.ports='eth0'
+
+          uci -q delete network.wan
+          uci set network.wan='interface'
+          uci set network.wan.device='eth1'
+          uci set network.wan.proto='dhcp'
+
+          uci -q delete network.wan6
+          uci set network.wan6='interface'
+          uci set network.wan6.device='eth1'
+          uci set network.wan6.proto='dhcpv6'
+
+          uci commit network
+
+          exit 0
+          EOF
+
+          chmod +x files/etc/uci-defaults/99-custom-network
+
       - name: Generate x86_64 config
         working-directory: ./openwrt
         run: |
@@ -79,6 +118,7 @@ jobs:
 
           CONFIG_PACKAGE_luci=y
           CONFIG_PACKAGE_luci-ssl-openssl=y
+          CONFIG_PACKAGE_luci-theme-bootstrap=y
 
           CONFIG_PACKAGE_luci-app-package-manager=y
           CONFIG_PACKAGE_luci-app-firewall=y

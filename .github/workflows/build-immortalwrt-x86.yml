@@ -38,9 +38,13 @@ jobs:
             gettext git libncurses-dev libssl-dev python3 python3-setuptools \
             rsync swig unzip zlib1g-dev file wget curl libelf-dev \
             libtool automake autoconf autopoint pkg-config ccache \
-            asciidoc binutils bzip2 fastjar genisoimage libglib2.0-dev \
-            libxml2-dev libzstd-dev patch python3-pip qemu-utils upx-ucl \
+            asciidoc binutils bzip2 genisoimage libglib2.0-dev \
+            libxml2-dev libzstd-dev patch python3-pip qemu-utils \
             xsltproc zstd
+
+          for pkg in fastjar upx-ucl; do
+            sudo apt install -y "$pkg" || echo "Optional dependency $pkg not available, continue"
+          done
 
       - name: Add swap safe mode
         run: |
@@ -310,6 +314,7 @@ jobs:
           CONFIG_PACKAGE_dns2socks=y
           CONFIG_PACKAGE_tcping=y
           CONFIG_PACKAGE_v2ray-geodata=y
+          CONFIG_PACKAGE_geoview=y
 
           CONFIG_PACKAGE_kmod-igc=y
           CONFIG_PACKAGE_ethtool=y
@@ -345,7 +350,7 @@ jobs:
           make defconfig
 
           echo "Final selected packages:"
-          grep -E "CONFIG_PACKAGE_(luci|luci-ssl-openssl|luci-app-package-manager|luci-app-firewall|luci-app-ttyd|luci-app-filemanager|luci-app-passwall|luci-i18n|xray-core|sing-box|chinadns-ng|dns2socks|tcping|v2ray-geodata|openssh-sftp-server|autocore|kmod-igc|kmod-hwmon-k10temp|lm-sensors|irqbalance)=" .config || true
+          grep -E "CONFIG_PACKAGE_(luci|luci-ssl-openssl|luci-app-package-manager|luci-app-firewall|luci-app-ttyd|luci-app-filemanager|luci-app-passwall|luci-i18n|xray-core|sing-box|chinadns-ng|dns2socks|tcping|v2ray-geodata|geoview|openssh-sftp-server|autocore|kmod-igc|kmod-hwmon-k10temp|lm-sensors|irqbalance)=" .config || true
           grep -E "CONFIG_TARGET_(ROOTFS|KERNEL)_PARTSIZE=" .config || true
 
       - name: Download packages safe mode
@@ -374,7 +379,7 @@ jobs:
           test -n "$(find bin/targets/x86/64 -type f -name '*combined*.img.gz' -print -quit)"
 
       - name: Upload firmware
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
           name: immortalwrt-x86_64-r3-4300u-passwall-apkfixed
           path: |

@@ -31,39 +31,37 @@ jobs:
         run: |
           sudo apt update
           sudo apt install -y \
-            ack antlr3 asciidoc autoconf automake autopoint binutils bison \
-            build-essential bzip2 ccache clang cmake cpio curl device-tree-compiler \
-            fastjar flex gawk gettext gcc-multilib g++-multilib git gperf haveged \
-            help2man intltool libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev \
-            libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev \
-            libssl-dev libtool lrzsz mkisofs msmtp nano ninja-build p7zip p7zip-full \
-            patch pkgconf python3 python3-pip python3-ply python3-docutils qemu-utils \
-            re2c rsync scons squashfs-tools subversion swig texinfo uglifyjs unzip \
-            vim wget xmlto xxd zlib1g-dev
+            build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
+            gettext git libncurses5-dev libncursesw5-dev libssl-dev python3 \
+            python3-setuptools rsync swig unzip zlib1g-dev file wget curl \
+            subversion libelf-dev libtool autoconf automake autopoint \
+            device-tree-compiler gperf antlr3 asciidoc binutils bzip2 ccache \
+            cmake cpio help2man intltool libglib2.0-dev libgmp-dev libltdl-dev \
+            libmpc-dev libmpfr-dev libreadline-dev ninja-build p7zip p7zip-full \
+            patch pkgconf python3-ply python3-docutils qemu-utils re2c scons \
+            squashfs-tools texinfo uglifyjs upx-ucl vim nano xmlto xxd zstd
 
       - name: Clone ImmortalWrt
         run: |
-          git clone --depth=1 -b $REPO_BRANCH $REPO_URL openwrt
+          git clone --depth=1 -b $REPO_BRANCH $REPO_URL immortalwrt
+
+      - name: Add PassWall feeds
+        working-directory: ./immortalwrt
+        run: |
+          sed -i '1i src-git passwall_packages https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git;main' feeds.conf.default
+          sed -i '2i src-git passwall_luci https://github.com/Openwrt-Passwall/openwrt-passwall.git;main' feeds.conf.default
+          cat feeds.conf.default
 
       - name: Update feeds
-        working-directory: ./openwrt
+        working-directory: ./immortalwrt
         run: |
           ./scripts/feeds update -a
           ./scripts/feeds install -a
-
-      - name: Add PassWall source
-        working-directory: ./openwrt
-        run: |
-          rm -rf feeds/packages/net/{xray-core,v2ray-geodata,sing-box,chinadns-ng,dns2socks,hysteria,ipt2socks,microsocks,naiveproxy,shadowsocks-rust,shadowsocksr-libev,simple-obfs,tcping,v2ray-plugin,xray-plugin,geoview,shadow-tls}
-          rm -rf feeds/luci/applications/luci-app-passwall
-
-          git clone --depth=1 https://github.com/Openwrt-Passwall/openwrt-passwall-packages package/passwall-packages
-          git clone --depth=1 https://github.com/Openwrt-Passwall/openwrt-passwall package/passwall
-
-          ./scripts/feeds install -a
+          ./scripts/feeds install -a -f -p passwall_packages
+          ./scripts/feeds install -a -f -p passwall_luci
 
       - name: Custom default network
-        working-directory: ./openwrt
+        working-directory: ./immortalwrt
         run: |
           mkdir -p files/etc/uci-defaults
 
@@ -95,14 +93,13 @@ jobs:
           uci set network.wan6.proto='dhcpv6'
 
           uci commit network
-
           exit 0
           EOF
 
           chmod +x files/etc/uci-defaults/99-custom-network
 
       - name: Generate x86_64 config
-        working-directory: ./openwrt
+        working-directory: ./immortalwrt
         run: |
           cat > .config <<'EOF'
           CONFIG_TARGET_x86=y
@@ -112,6 +109,7 @@ jobs:
           CONFIG_EFI_IMAGES=y
           CONFIG_GRUB_IMAGES=y
           CONFIG_TARGET_IMAGES_GZIP=y
+          CONFIG_TARGET_ROOTFS_PARTSIZE=1024
 
           CONFIG_TARGET_ROOTFS_SQUASHFS=y
           CONFIG_TARGET_ROOTFS_EXT4FS=y
@@ -143,41 +141,37 @@ jobs:
           CONFIG_PACKAGE_curl=y
           CONFIG_PACKAGE_wget-ssl=y
           CONFIG_PACKAGE_ca-bundle=y
+
           CONFIG_PACKAGE_kmod-nft-offload=y
+          CONFIG_PACKAGE_kmod-nft-tproxy=y
+          CONFIG_PACKAGE_kmod-nft-socket=y
+          CONFIG_PACKAGE_kmod-inet-diag=y
+          CONFIG_PACKAGE_tcping=y
+
+          # CONFIG_PACKAGE_dnsmasq is not set
+          CONFIG_PACKAGE_dnsmasq-full=y
 
           CONFIG_PACKAGE_xray-core=y
           CONFIG_PACKAGE_v2ray-geodata=y
           CONFIG_PACKAGE_sing-box=y
-          CONFIG_PACKAGE_chinadns-ng=y
-          CONFIG_PACKAGE_dns2socks=y
-          CONFIG_PACKAGE_hysteria=y
-          CONFIG_PACKAGE_ipt2socks=y
-          CONFIG_PACKAGE_microsocks=y
-          CONFIG_PACKAGE_naiveproxy=y
-          CONFIG_PACKAGE_shadowsocks-rust-sslocal=y
-          CONFIG_PACKAGE_shadowsocks-rust-ssserver=y
-          CONFIG_PACKAGE_shadowsocksr-libev-ssr-local=y
-          CONFIG_PACKAGE_simple-obfs=y
-          CONFIG_PACKAGE_tcping=y
-          CONFIG_PACKAGE_xray-plugin=y
           EOF
 
           make defconfig
 
       - name: Download packages
-        working-directory: ./openwrt
+        working-directory: ./immortalwrt
         run: |
           make download -j8
           find dl -size -1024c -exec rm -f {} \;
 
       - name: Build firmware
-        working-directory: ./openwrt
+        working-directory: ./immortalwrt
         run: |
-          make -j$(nproc) V=s
+          make -j$(nproc) V=s || make -j1 V=s
 
       - name: Upload firmware
         uses: actions/upload-artifact@v4
         with:
           name: ImmortalWrt-x86_64-SNAPSHOT
           path: |
-            openwrt/bin/targets/x86/64/*
+            immortalwrt/bin/targets/x86/64/*

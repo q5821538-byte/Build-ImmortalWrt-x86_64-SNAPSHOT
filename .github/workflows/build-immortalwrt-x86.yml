@@ -83,13 +83,23 @@ jobs:
           set -e
           git clone --depth=1 -b "$REPO_BRANCH" "$REPO_URL" immortalwrt
 
-      - name: Add PassWall source packages
+      - name: Add PassWall feeds
         working-directory: immortalwrt
         run: |
           set -e
-          git clone --depth=1 https://github.com/xiaorouji/openwrt-passwall.git package/passwall
-          git clone --depth=1 https://github.com/xiaorouji/openwrt-passwall-packages.git package/passwall-packages
-          rm -rf package/passwall/.git package/passwall-packages/.git || true
+
+          # Use the current official PassWall source repositories.
+          # Put them at the top so they take priority over old copies from default feeds.
+          cat > /tmp/passwall-feeds.conf <<'EOF_PASSWALL_FEEDS'
+          src-git passwall_luci https://github.com/Openwrt-Passwall/openwrt-passwall.git;main
+          src-git passwall_packages https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git;main
+          EOF_PASSWALL_FEEDS
+          sed -i 's/^          //' /tmp/passwall-feeds.conf
+          cat /tmp/passwall-feeds.conf feeds.conf.default > feeds.conf.default.new
+          mv feeds.conf.default.new feeds.conf.default
+
+          echo "PassWall feeds added:"
+          head -n 5 feeds.conf.default
 
       - name: Update and install feeds safe mode
         working-directory: immortalwrt
@@ -121,6 +131,10 @@ jobs:
             rm -rf tmp/feeds* tmp/info/.files-* || true
             ./scripts/feeds update -a
           }
+
+          echo "Removing possible old/conflicting PassWall packages from default feeds..."
+          rm -rf feeds/luci/applications/luci-app-passwall || true
+          rm -rf feeds/packages/net/{xray-core,v2ray-geodata,sing-box,chinadns-ng,dns2socks,hysteria,ipt2socks,microsocks,naiveproxy,shadowsocks-rust,shadowsocksr-libev,simple-obfs,tcping,v2ray-plugin,xray-plugin,geoview,shadow-tls} || true
 
           echo "Installing feeds..."
           retry ./scripts/feeds install -a || {
@@ -179,7 +193,7 @@ jobs:
           for f in /etc/apk/repositories /etc/apk/repositories.d/*.list /etc/apk/repositories.d/*.repositories; do
                   [ -f "$f" ] || continue
                   awk '
-                          /\/packages\/x86_64\/video\/?([[:space:]]*)$/ && $0 !~ /^[[:space:]]*#/ { print "# " $0; next }
+                          /\/packages\/x86_64\/video(\/packages\.adb)?\/?([[:space:]]*)$/ && $0 !~ /^[[:space:]]*#/ { print "# " $0; next }
                           { print }
                   ' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
           done
@@ -256,6 +270,13 @@ jobs:
 
           # PassWall
           CONFIG_PACKAGE_luci-app-passwall=y
+          CONFIG_PACKAGE_luci-i18n-passwall-zh-cn=y
+          CONFIG_PACKAGE_xray-core=y
+          CONFIG_PACKAGE_sing-box=y
+          CONFIG_PACKAGE_chinadns-ng=y
+          CONFIG_PACKAGE_dns2socks=y
+          CONFIG_PACKAGE_tcping=y
+          CONFIG_PACKAGE_v2ray-geodata=y
 
           # R3 4300U / x86_64 / I226-V
           CONFIG_PACKAGE_kmod-igc=y
@@ -297,7 +318,7 @@ jobs:
           make defconfig
 
           echo "Final selected packages:"
-          grep -E "CONFIG_PACKAGE_(luci|luci-ssl-openssl|luci-app-package-manager|luci-app-firewall|luci-app-ttyd|luci-app-filemanager|luci-app-passwall|luci-i18n|openssh-sftp-server|autocore|kmod-igc|kmod-hwmon-k10temp|lm-sensors|irqbalance)=" .config || true
+          grep -E "CONFIG_PACKAGE_(luci|luci-ssl-openssl|luci-app-package-manager|luci-app-firewall|luci-app-ttyd|luci-app-filemanager|luci-app-passwall|luci-i18n|xray-core|sing-box|chinadns-ng|dns2socks|tcping|v2ray-geodata|openssh-sftp-server|autocore|kmod-igc|kmod-hwmon-k10temp|lm-sensors|irqbalance)=" .config || true
           grep -E "CONFIG_TARGET_(ROOTFS|KERNEL)_PARTSIZE=" .config || true
 
       - name: Download packages safe mode

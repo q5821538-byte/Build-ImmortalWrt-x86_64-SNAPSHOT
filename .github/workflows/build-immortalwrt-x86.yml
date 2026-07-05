@@ -36,7 +36,10 @@ jobs:
             build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
             gettext git libncurses-dev libssl-dev python3 python3-setuptools \
             rsync swig unzip zlib1g-dev file wget curl libelf-dev \
-            libtool automake autoconf autopoint pkg-config ccache
+            libtool automake autoconf autopoint pkg-config ccache \
+            asciidoc binutils bzip2 fastjar genisoimage libglib2.0-dev \
+            libxml2-dev libzstd-dev patch python3-pip qemu-utils upx-ucl \
+            xsltproc zstd
 
       - name: Add swap safe mode
         run: |
@@ -79,6 +82,14 @@ jobs:
         run: |
           set -e
           git clone --depth=1 -b "$REPO_BRANCH" "$REPO_URL" immortalwrt
+
+      - name: Add PassWall source packages
+        working-directory: immortalwrt
+        run: |
+          set -e
+          git clone --depth=1 https://github.com/xiaorouji/openwrt-passwall.git package/passwall
+          git clone --depth=1 https://github.com/xiaorouji/openwrt-passwall-packages.git package/passwall-packages
+          rm -rf package/passwall/.git package/passwall-packages/.git || true
 
       - name: Update and install feeds safe mode
         working-directory: immortalwrt
@@ -128,7 +139,7 @@ jobs:
           mkdir -p files/etc/uci-defaults
           mkdir -p files/etc/sysctl.d
 
-          cat > files/etc/config/network <<'EOF'
+          cat > files/etc/config/network <<'EOF_NET'
           config interface 'loopback'
                   option device 'lo'
                   option proto 'static'
@@ -156,11 +167,32 @@ jobs:
           config interface 'wan6'
                   option device 'eth1'
                   option proto 'dhcpv6'
-          EOF
+          EOF_NET
 
           sed -i 's/^          //' files/etc/config/network
 
-          cat > files/etc/uci-defaults/99-r3-4300u-defaults <<'EOF'
+          cat > files/etc/uci-defaults/98-fix-apk-repositories <<'EOF_APK'
+          #!/bin/sh
+
+          # ImmortalWrt SNAPSHOT x86_64 video repo may occasionally return a broken packages.adb.
+          # R3 4300U router builds do not need the video feed by default, so disable only this feed.
+          for f in /etc/apk/repositories /etc/apk/repositories.d/*.list /etc/apk/repositories.d/*.repositories; do
+                  [ -f "$f" ] || continue
+                  awk '
+                          /\/packages\/x86_64\/video\/?([[:space:]]*)$/ && $0 !~ /^[[:space:]]*#/ { print "# " $0; next }
+                          { print }
+                  ' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+          done
+
+          rm -rf /var/cache/apk/* /tmp/apk-cache/* 2>/dev/null || true
+
+          exit 0
+          EOF_APK
+
+          sed -i 's/^          //' files/etc/uci-defaults/98-fix-apk-repositories
+          chmod +x files/etc/uci-defaults/98-fix-apk-repositories
+
+          cat > files/etc/uci-defaults/99-r3-4300u-defaults <<'EOF_DEFAULTS'
           #!/bin/sh
 
           uci -q batch <<'UCI'
@@ -182,21 +214,21 @@ jobs:
           UCI
 
           uci -q get luci.main >/dev/null 2>&1 || uci set luci.main='core'
-          uci -q set luci.main.lang='zh_cn'
+          uci -q set luci.main.lang='zh-cn'
           uci -q commit luci
 
           exit 0
-          EOF
+          EOF_DEFAULTS
 
           sed -i 's/^          //' files/etc/uci-defaults/99-r3-4300u-defaults
           chmod +x files/etc/uci-defaults/99-r3-4300u-defaults
 
-          cat > files/etc/sysctl.d/99-r3-4300u.conf <<'EOF'
+          cat > files/etc/sysctl.d/99-r3-4300u.conf <<'EOF_SYSCTL'
           net.core.default_qdisc=fq_codel
-          EOF
+          EOF_SYSCTL
           sed -i 's/^          //' files/etc/sysctl.d/99-r3-4300u.conf
 
-          cat > .config <<'EOF'
+          cat > .config <<'EOF_CONFIG'
           CONFIG_TARGET_x86=y
           CONFIG_TARGET_x86_64=y
           CONFIG_TARGET_x86_64_DEVICE_generic=y
@@ -205,8 +237,8 @@ jobs:
           CONFIG_GRUB_EFI_IMAGES=y
           CONFIG_TARGET_IMAGES_GZIP=y
           CONFIG_TARGET_ROOTFS_SQUASHFS=y
-          CONFIG_TARGET_ROOTFS_PARTSIZE=512
-          CONFIG_TARGET_KERNEL_PARTSIZE=64
+          CONFIG_TARGET_ROOTFS_PARTSIZE=1024
+          CONFIG_TARGET_KERNEL_PARTSIZE=128
 
           # LuCI + 中文 + 常用管理
           CONFIG_PACKAGE_luci=y
@@ -221,6 +253,9 @@ jobs:
           CONFIG_PACKAGE_luci-i18n-ttyd-zh-cn=y
           CONFIG_PACKAGE_luci-i18n-filemanager-zh-cn=y
           CONFIG_PACKAGE_openssh-sftp-server=y
+
+          # PassWall
+          CONFIG_PACKAGE_luci-app-passwall=y
 
           # R3 4300U / x86_64 / I226-V
           CONFIG_PACKAGE_kmod-igc=y
@@ -239,20 +274,31 @@ jobs:
           CONFIG_PACKAGE_fdisk=y
           CONFIG_PACKAGE_parted=y
 
-          # 明确不要代理插件
+          # 明确不要其他代理插件
           # CONFIG_PACKAGE_luci-app-openclash is not set
-          # CONFIG_PACKAGE_luci-app-passwall is not set
           # CONFIG_PACKAGE_luci-app-passwall2 is not set
           # CONFIG_PACKAGE_luci-app-ssr-plus is not set
           # CONFIG_PACKAGE_luci-app-nikki is not set
-          EOF
+          EOF_CONFIG
 
           sed -i 's/^          //' .config
 
           make defconfig
 
+          # Force these values after defconfig too, so they cannot be silently changed back.
+          grep -q '^CONFIG_TARGET_ROOTFS_PARTSIZE=' .config && \
+            sed -i 's/^CONFIG_TARGET_ROOTFS_PARTSIZE=.*/CONFIG_TARGET_ROOTFS_PARTSIZE=1024/' .config || \
+            echo 'CONFIG_TARGET_ROOTFS_PARTSIZE=1024' >> .config
+
+          grep -q '^CONFIG_TARGET_KERNEL_PARTSIZE=' .config && \
+            sed -i 's/^CONFIG_TARGET_KERNEL_PARTSIZE=.*/CONFIG_TARGET_KERNEL_PARTSIZE=128/' .config || \
+            echo 'CONFIG_TARGET_KERNEL_PARTSIZE=128' >> .config
+
+          make defconfig
+
           echo "Final selected packages:"
-          grep -E "CONFIG_PACKAGE_(luci|luci-ssl-openssl|luci-app-package-manager|luci-app-firewall|luci-app-ttyd|luci-app-filemanager|luci-i18n|openssh-sftp-server|autocore|kmod-igc|kmod-hwmon-k10temp|lm-sensors|irqbalance)=" .config || true
+          grep -E "CONFIG_PACKAGE_(luci|luci-ssl-openssl|luci-app-package-manager|luci-app-firewall|luci-app-ttyd|luci-app-filemanager|luci-app-passwall|luci-i18n|openssh-sftp-server|autocore|kmod-igc|kmod-hwmon-k10temp|lm-sensors|irqbalance)=" .config || true
+          grep -E "CONFIG_TARGET_(ROOTFS|KERNEL)_PARTSIZE=" .config || true
 
       - name: Download packages safe mode
         working-directory: immortalwrt
@@ -285,7 +331,7 @@ jobs:
       - name: Upload firmware
         uses: actions/upload-artifact@v6
         with:
-          name: immortalwrt-x86_64-r3-4300u
+          name: immortalwrt-x86_64-r3-4300u-passwall-apkfixed
           path: |
             immortalwrt/bin/targets/x86/64/*combined*.img.gz
             immortalwrt/bin/targets/x86/64/*rootfs*.img.gz

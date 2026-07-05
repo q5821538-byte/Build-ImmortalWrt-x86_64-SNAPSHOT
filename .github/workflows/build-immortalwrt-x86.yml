@@ -38,42 +38,86 @@ jobs:
             rsync swig unzip zlib1g-dev file wget curl libelf-dev \
             libtool automake autoconf autopoint pkg-config ccache
 
-      - name: Add swap
+      - name: Add swap safe mode
         run: |
-          set -e
+          # Swap is helpful for full source compile, but this step must never stop the build.
+          set +e
 
           echo "Swap before:"
           swapon --show || true
           free -h || true
+          df -h / /mnt || true
 
           SWAPFILE="/mnt/swapfile-${GITHUB_RUN_ID}"
 
-          if [ -f "$SWAPFILE" ]; then
-            sudo swapoff "$SWAPFILE" 2>/dev/null || true
-            sudo rm -f "$SWAPFILE"
-          fi
+          sudo swapoff "$SWAPFILE" 2>/dev/null || true
+          sudo rm -f "$SWAPFILE" || true
 
           echo "Creating swap at $SWAPFILE"
-          sudo fallocate -l 8G "$SWAPFILE" || sudo dd if=/dev/zero of="$SWAPFILE" bs=1M count=8192 status=progress
-          sudo chmod 600 "$SWAPFILE"
-          sudo mkswap "$SWAPFILE"
-          sudo swapon "$SWAPFILE"
+          sudo fallocate -l 8G "$SWAPFILE"
+          FALL_RESULT=$?
+
+          if [ "$FALL_RESULT" -ne 0 ]; then
+            echo "fallocate failed, trying dd fallback"
+            sudo dd if=/dev/zero of="$SWAPFILE" bs=1M count=8192 status=progress
+          fi
+
+          if [ -f "$SWAPFILE" ]; then
+            sudo chmod 600 "$SWAPFILE" || true
+            sudo mkswap "$SWAPFILE" || true
+            sudo swapon "$SWAPFILE" || true
+          fi
 
           echo "Swap after:"
-          swapon --show
-          free -h
+          swapon --show || true
+          free -h || true
+
+          # Do not fail the workflow because of swap.
+          exit 0
 
       - name: Clone ImmortalWrt source
         run: |
           set -e
           git clone --depth=1 -b "$REPO_BRANCH" "$REPO_URL" immortalwrt
 
-      - name: Update and install feeds
+      - name: Update and install feeds safe mode
         working-directory: immortalwrt
         run: |
           set -e
-          ./scripts/feeds update -a
-          ./scripts/feeds install -a
+
+          git config --global http.version HTTP/1.1 || true
+          git config --global http.postBuffer 524288000 || true
+
+          retry() {
+            local max=3
+            local n=1
+            until "$@"; do
+              if [ "$n" -ge "$max" ]; then
+                echo "Command failed after $max attempts: $*"
+                return 1
+              fi
+              echo "Command failed: $*"
+              echo "Retrying in $((n * 20)) seconds..."
+              sleep $((n * 20))
+              n=$((n + 1))
+            done
+          }
+
+          echo "Updating feeds..."
+          retry ./scripts/feeds update -a || {
+            echo "Feeds update failed, cleaning feed cache and retrying once..."
+            ./scripts/feeds clean || true
+            rm -rf tmp/feeds* tmp/info/.files-* || true
+            ./scripts/feeds update -a
+          }
+
+          echo "Installing feeds..."
+          retry ./scripts/feeds install -a || {
+            echo "Feeds install failed, cleaning feed cache and retrying once..."
+            rm -rf tmp/feeds* tmp/info/.files-* || true
+            ./scripts/feeds update -a
+            ./scripts/feeds install -a
+          }
 
       - name: Generate final x86_64 config for R3 4300U
         working-directory: immortalwrt
@@ -210,11 +254,17 @@ jobs:
           echo "Final selected packages:"
           grep -E "CONFIG_PACKAGE_(luci|luci-ssl-openssl|luci-app-package-manager|luci-app-firewall|luci-app-ttyd|luci-app-filemanager|luci-i18n|openssh-sftp-server|autocore|kmod-igc|kmod-hwmon-k10temp|lm-sensors|irqbalance)=" .config || true
 
-      - name: Download packages
+      - name: Download packages safe mode
         working-directory: immortalwrt
         run: |
           set -e
-          make download -j"$(nproc)" || make download -j1 V=s
+
+          make download -j"$(nproc)" || make download -j1 V=s || {
+            echo "Download failed, removing tiny/broken files and retrying..."
+            find dl -size -1024c -exec rm -f {} \; || true
+            make download -j1 V=s
+          }
+
           find dl -size -1024c -exec rm -f {} \; || true
 
       - name: Build firmware

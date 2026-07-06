@@ -400,6 +400,17 @@ jobs:
               wget -q -O /etc/apk/keys/nikki.pem https://nikkinikki.pages.dev/public-key.pem || true
 
               apk update || true
+
+              # Official ImmortalWrt LuCI Chinese packages. These come from the normal snapshot repos.
+              apk add \
+                luci-i18n-base-zh-cn \
+                luci-i18n-firewall-zh-cn \
+                luci-i18n-package-manager-zh-cn \
+                luci-i18n-ttyd-zh-cn \
+                luci-i18n-filemanager-zh-cn \
+                2>/dev/null || true
+
+              # Nikki Chinese package comes from the Nikki APK feed when it was not embedded at build time.
               apk add --allow-untrusted -X "${feed_url}/packages.adb" luci-i18n-nikki-zh-cn || true
 
               rm -rf /tmp/luci-indexcache /tmp/luci-modulecache 2>/dev/null || true
@@ -434,6 +445,7 @@ jobs:
 
           CONFIG_PACKAGE_luci=y
           CONFIG_PACKAGE_luci-ssl-openssl=y
+          CONFIG_LUCI_LANG_zh_Hans=y
           CONFIG_PACKAGE_luci-app-package-manager=y
           CONFIG_PACKAGE_luci-app-firewall=y
           CONFIG_PACKAGE_luci-app-ttyd=y
@@ -501,15 +513,11 @@ jobs:
 
           echo "Checking required packages after defconfig..."
           REQUIRED_PACKAGES="
+          luci
+          luci-ssl-openssl
           luci-app-nikki
           nikki
           luci-app-passwall
-          luci-i18n-passwall-zh-cn
-          luci-i18n-base-zh-cn
-          luci-i18n-firewall-zh-cn
-          luci-i18n-package-manager-zh-cn
-          luci-i18n-ttyd-zh-cn
-          luci-i18n-filemanager-zh-cn
           kmod-dummy
           kmod-tun
           kmod-nft-socket
@@ -526,13 +534,19 @@ jobs:
           [ "$MISSING" = "0" ]
 
           OPTIONAL_PACKAGES="
+          luci-i18n-base-zh-cn
+          luci-i18n-firewall-zh-cn
+          luci-i18n-package-manager-zh-cn
+          luci-i18n-ttyd-zh-cn
+          luci-i18n-filemanager-zh-cn
+          luci-i18n-passwall-zh-cn
           luci-i18n-nikki-zh-cn
           "
           for pkg in $OPTIONAL_PACKAGES; do
             if grep -q "^CONFIG_PACKAGE_${pkg}=y$" .config; then
-              echo "Optional package selected after defconfig: ${pkg}"
+              echo "Chinese language package selected after defconfig: ${pkg}"
             else
-              echo "::warning::Optional package not selected after defconfig: ${pkg}. The boot-time nikki-i18n-fix service will try to install it from the Nikki APK feed."
+              echo "::warning::Chinese language package not selected after defconfig: ${pkg}. Continue building; boot-time fallback will try to install what is available."
             fi
           done
 
@@ -568,7 +582,7 @@ jobs:
           MANIFEST="$(find bin/targets/x86/64 -type f -name '*.manifest' -print -quit)"
           if [ -n "$MANIFEST" ]; then
             echo "Checking rootfs manifest: $MANIFEST"
-            REQUIRED_IN_IMAGE="luci-app-nikki nikki luci-app-passwall luci-i18n-passwall-zh-cn luci-i18n-base-zh-cn"
+            REQUIRED_IN_IMAGE="luci-app-nikki nikki luci-app-passwall"
             MISSING=0
             for pkg in $REQUIRED_IN_IMAGE; do
               if ! grep -q "^${pkg}[[:space:]]" "$MANIFEST"; then
@@ -578,11 +592,22 @@ jobs:
             done
             [ "$MISSING" = "0" ]
 
-            if grep -q "^luci-i18n-nikki-zh-cn[[:space:]]" "$MANIFEST"; then
-              echo "Nikki Chinese language package is included in the final firmware."
-            else
-              echo "::warning::Nikki Chinese language package is not in the final manifest. The boot-time nikki-i18n-fix service will try to install it from the Nikki APK feed."
-            fi
+            OPTIONAL_IN_IMAGE="
+            luci-i18n-base-zh-cn
+            luci-i18n-firewall-zh-cn
+            luci-i18n-package-manager-zh-cn
+            luci-i18n-ttyd-zh-cn
+            luci-i18n-filemanager-zh-cn
+            luci-i18n-passwall-zh-cn
+            luci-i18n-nikki-zh-cn
+            "
+            for pkg in $OPTIONAL_IN_IMAGE; do
+              if grep -q "^${pkg}[[:space:]]" "$MANIFEST"; then
+                echo "Chinese language package is included in the final firmware: ${pkg}"
+              else
+                echo "::warning::Chinese language package is not in the final manifest: ${pkg}. Boot-time fallback will try to install what is available."
+              fi
+            done
           else
             echo "::warning::No manifest file found; cannot verify installed package list."
           fi

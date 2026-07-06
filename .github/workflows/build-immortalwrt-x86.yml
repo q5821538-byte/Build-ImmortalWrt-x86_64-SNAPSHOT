@@ -195,13 +195,19 @@ jobs:
             ./scripts/feeds install -a
           }
 
-          # Keep PassWall/Nikki packages installed from local feeds, but do not let these
-          # local feed names become runtime APK repositories.
-          for fc in feeds.conf.default feeds.conf; do
-            [ -f "$fc" ] || continue
-            awk '$2 != "passwall_packages" && $2 != "passwall_luci" && $2 != "nikki"' "$fc" > "$fc.nocustomrepos"
-            mv "$fc.nocustomrepos" "$fc"
-          done
+          echo "Force installing required custom-feed package links..."
+          ./scripts/feeds install -f -p nikki nikki luci-app-nikki luci-i18n-nikki-zh-cn
+          ./scripts/feeds install -f -p passwall_luci luci-app-passwall luci-i18n-passwall-zh-cn || true
+          ./scripts/feeds install -f -p passwall_packages xray-core sing-box chinadns-ng dns2socks tcping v2ray-geodata geoview || true
+
+          echo "Checking package links..."
+          test -e package/feeds/nikki/nikki
+          test -e package/feeds/nikki/luci-app-nikki
+          test -e package/feeds/nikki/luci-i18n-nikki-zh-cn
+
+          # Do not remove custom feed entries before make defconfig/build.
+          # Runtime APK repositories are fixed by /etc/uci-defaults/98-fix-apk-repositories instead,
+          # so build-time feeds can still generate every package, including luci-i18n-nikki-zh-cn.
 
       - name: Generate final x86_64 config for R3 4300U
         working-directory: immortalwrt
@@ -329,6 +335,47 @@ jobs:
           sed -i 's/^          //' files/etc/uci-defaults/99-r3-4300u-defaults
           chmod +x files/etc/uci-defaults/99-r3-4300u-defaults
 
+          mkdir -p files/etc/init.d files/etc/rc.d
+          cat > files/etc/init.d/nikki-i18n-fix <<'EOF_NIKKI_I18N_FIX'
+          #!/bin/sh /etc/rc.common
+
+          START=99
+
+          boot() {
+            (
+              sleep 45
+
+              command -v apk >/dev/null 2>&1 || exit 0
+              apk info luci-i18n-nikki-zh-cn >/dev/null 2>&1 && exit 0
+
+              . /etc/openwrt_release 2>/dev/null || true
+              arch="${DISTRIB_ARCH:-x86_64}"
+              case "${DISTRIB_RELEASE:-SNAPSHOT}" in
+                *"24.10"*) branch="openwrt-24.10" ;;
+                *"25.12"*) branch="openwrt-25.12" ;;
+                "SNAPSHOT"|*) branch="SNAPSHOT" ;;
+              esac
+
+              feed_url="https://nikkinikki.pages.dev/${branch}/${arch}/nikki"
+              mkdir -p /etc/apk/keys
+              wget -q -O /etc/apk/keys/nikki.pem https://nikkinikki.pages.dev/public-key.pem || true
+
+              apk update || true
+              apk add --allow-untrusted -X "${feed_url}/packages.adb" luci-i18n-nikki-zh-cn || true
+
+              rm -rf /tmp/luci-indexcache /tmp/luci-modulecache 2>/dev/null || true
+              /etc/init.d/uhttpd restart >/dev/null 2>&1 || true
+
+              if apk info luci-i18n-nikki-zh-cn >/dev/null 2>&1; then
+                /etc/init.d/nikki-i18n-fix disable >/dev/null 2>&1 || true
+              fi
+            ) &
+          }
+          EOF_NIKKI_I18N_FIX
+          sed -i 's/^          //' files/etc/init.d/nikki-i18n-fix
+          chmod +x files/etc/init.d/nikki-i18n-fix
+          ln -sf ../init.d/nikki-i18n-fix files/etc/rc.d/S99nikki-i18n-fix
+
           cat > files/etc/sysctl.d/99-r3-4300u.conf <<'EOF_SYSCTL'
           net.core.default_qdisc=fq_codel
           EOF_SYSCTL
@@ -413,6 +460,33 @@ jobs:
 
           make defconfig
 
+          echo "Checking required packages after defconfig..."
+          REQUIRED_PACKAGES="
+          luci-app-nikki
+          luci-i18n-nikki-zh-cn
+          nikki
+          luci-app-passwall
+          luci-i18n-passwall-zh-cn
+          luci-i18n-base-zh-cn
+          luci-i18n-firewall-zh-cn
+          luci-i18n-package-manager-zh-cn
+          luci-i18n-ttyd-zh-cn
+          luci-i18n-filemanager-zh-cn
+          kmod-dummy
+          kmod-tun
+          kmod-nft-socket
+          kmod-nft-tproxy
+          kmod-inet-diag
+          "
+          MISSING=0
+          for pkg in $REQUIRED_PACKAGES; do
+            if ! grep -q "^CONFIG_PACKAGE_${pkg}=y$" .config; then
+              echo "::error::Required package not selected after defconfig: ${pkg}"
+              MISSING=1
+            fi
+          done
+          [ "$MISSING" = "0" ]
+
           echo "Final selected packages:"
           grep -E "CONFIG_PACKAGE_(luci|luci-ssl-openssl|luci-app-package-manager|luci-app-firewall|luci-app-ttyd|luci-app-filemanager|luci-app-passwall|luci-app-nikki|luci-i18n|nikki|xray-core|sing-box|chinadns-ng|dns2socks|tcping|v2ray-geodata|geoview|openssh-sftp-server|autocore|kmod-dummy|kmod-inet-diag|kmod-nft-socket|kmod-nft-tproxy|kmod-tun|kmod-igc|kmod-hwmon-k10temp|lm-sensors|irqbalance)=" .config || true
           grep -E "CONFIG_TARGET_(ROOTFS|KERNEL)_PARTSIZE=" .config || true
@@ -442,6 +516,22 @@ jobs:
           find bin/targets/x86/64 -type f | sort
           test -n "$(find bin/targets/x86/64 -type f -name '*combined*.img.gz' -print -quit)"
 
+          MANIFEST="$(find bin/targets/x86/64 -type f -name '*.manifest' -print -quit)"
+          if [ -n "$MANIFEST" ]; then
+            echo "Checking rootfs manifest: $MANIFEST"
+            REQUIRED_IN_IMAGE="luci-app-nikki luci-i18n-nikki-zh-cn nikki luci-app-passwall luci-i18n-passwall-zh-cn luci-i18n-base-zh-cn"
+            MISSING=0
+            for pkg in $REQUIRED_IN_IMAGE; do
+              if ! grep -q "^${pkg}[[:space:]]" "$MANIFEST"; then
+                echo "::error::Package missing from final firmware manifest: ${pkg}"
+                MISSING=1
+              fi
+            done
+            [ "$MISSING" = "0" ]
+          else
+            echo "::warning::No manifest file found; cannot verify installed package list."
+          fi
+
       - name: Upload firmware
         uses: actions/upload-artifact@v6
         with:
@@ -449,6 +539,7 @@ jobs:
           path: |
             immortalwrt/bin/targets/x86/64/*combined*.img.gz
             immortalwrt/bin/targets/x86/64/*rootfs*.img.gz
+            immortalwrt/bin/targets/x86/64/*.manifest
             immortalwrt/bin/targets/x86/64/sha256sums
           if-no-files-found: error
           compression-level: 0

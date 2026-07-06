@@ -613,7 +613,7 @@ jobs:
           fi
 
       - name: Upload firmware
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: immortalwrt-x86_64-r3-4300u-passwall-nikki-kmoddummy
           path: |

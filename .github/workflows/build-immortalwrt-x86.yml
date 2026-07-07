@@ -426,57 +426,6 @@ jobs:
           chmod +x files/etc/init.d/nikki-i18n-fix
           ln -sf ../init.d/nikki-i18n-fix files/etc/rc.d/S99nikki-i18n-fix
 
-          echo "Embedding stable Mihomo core for Nikki..."
-          mkdir -p files/usr/bin
-
-          MIHOMO_JSON="$(curl -fsSL --retry 3 --retry-delay 5 https://api.github.com/repos/MetaCubeX/mihomo/releases/latest)"
-          printf '%s' "$MIHOMO_JSON" > /tmp/mihomo_release.json
-          MIHOMO_TAG="$(python3 -c 'import json; print(json.load(open("/tmp/mihomo_release.json"))["tag_name"])')"
-          MIHOMO_URL="$(python3 <<'PY_MIHOMO'
-          import json
-          import re
-
-          data = json.load(open("/tmp/mihomo_release.json"))
-          tag = data.get("tag_name", "")
-          assets = data.get("assets", [])
-
-          # R3 4300U is x86_64. Use amd64-v1 first for maximum compatibility/stability.
-          patterns = [
-              rf"^mihomo-linux-amd64-v1-{re.escape(tag)}\.gz$",
-              rf"^mihomo-linux-amd64-compatible-{re.escape(tag)}\.gz$",
-              rf"^mihomo-linux-amd64-{re.escape(tag)}\.gz$",
-              r"^mihomo-linux-amd64-v1-.*\.gz$",
-              r"^mihomo-linux-amd64-compatible-.*\.gz$",
-              r"^mihomo-linux-amd64-.*\.gz$",
-          ]
-
-          for pattern in patterns:
-              for asset in assets:
-                  name = asset.get("name", "")
-                  url = asset.get("browser_download_url", "")
-                  if re.match(pattern, name) and url:
-                      print(url)
-                      raise SystemExit(0)
-
-          print("", end="")
-          PY_MIHOMO
-          )"
-          if [ -z "$MIHOMO_URL" ]; then
-            echo "::error::Could not find a stable Mihomo linux amd64 asset in latest release ${MIHOMO_TAG}."
-            echo "Available assets:"
-            python3 -c 'import json; [print(a.get("name","")) for a in json.load(open("/tmp/mihomo_release.json")).get("assets", [])]'
-            exit 1
-          fi
-
-          echo "Using stable Mihomo core: ${MIHOMO_TAG}"
-          echo "Download URL: ${MIHOMO_URL}"
-          curl -fL --retry 3 --retry-delay 5 -o /tmp/mihomo.gz "$MIHOMO_URL"
-          gzip -dc /tmp/mihomo.gz > files/usr/bin/mihomo
-          chmod 0755 files/usr/bin/mihomo
-          file files/usr/bin/mihomo || true
-          files/usr/bin/mihomo -v || true
-
-
           cat > files/etc/sysctl.d/99-r3-4300u.conf <<'EOF_SYSCTL'
           net.core.default_qdisc=fq_codel
           EOF_SYSCTL
